@@ -176,6 +176,23 @@ class BroadcastListenerProtocol(DeviceProtocolBase2):
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
 
+def _zip_state_payload(cols, dat):
+    """Zip a state reply by the returned cols, warning on length mismatch.
+
+    The AC sometimes drops columns (e.g. AIEnSaveDis) from `dat` while the
+    request list stays fixed, so zip strictly by the returned `cols` — never
+    re-index against the request order — and let absent keys read as None.
+    """
+    if len(cols) != len(dat):
+        _LOGGER.warning(
+            "State cols/dat length mismatch: %d cols vs %d dat; "
+            "zipping by returned cols, tail keys will read None",
+            len(cols),
+            len(dat),
+        )
+    return dict(zip(cols, dat))
+
+
 class DeviceProtocol2(DeviceProtocolBase2):
     """Protocol handler for direct device communication."""
     _handlers = {}
@@ -221,7 +238,7 @@ class DeviceProtocol2(DeviceProtocolBase2):
         """
         params = {
             Response.BIND_OK.value: lambda o, a: [o["pack"]["key"]],
-            Response.DATA.value: lambda o, a: [dict(zip(o["pack"]["cols"], o["pack"]["dat"]))],
+            Response.DATA.value: lambda o, a: [_zip_state_payload(o["pack"]["cols"], o["pack"]["dat"])],
             Response.RESULT.value: lambda o, a: [dict(zip(o["pack"]["opt"], o["pack"].get("val", []) or o["pack"].get("p", [])))],
         }
         handlers = {

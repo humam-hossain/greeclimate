@@ -60,6 +60,8 @@ There are several properties representing the state of the HVAC. Setting these p
 
 Not all properties are supported on each device, in the event a property isn't supported commands to the HVAC will simply be ignored.
 
+The property set is additive: newer fields discovered from recent Gree+ app traffic are included alongside older fields still used by legacy units (for example `TemSen` and dehumidifier sensors). Sleep-curve schedule fields (`Slp1L*` / `Slp1H*`) from those captures are exposed as read-only properties (`sleep_curve_l1..l8`, `sleep_curve_h1..h8`).
+
 When setting a value it is cached but not pushed to the device until `Device.push_state_update()` is called.
 
 ```python
@@ -81,6 +83,19 @@ device.turbo = True
 device.steady_heat = True
 device.power_save = True
 device.target_humidity = 45
+
+# Read-only status fields (when reported by the unit) — assigning to these
+# raises AttributeError; they are never pushed to the device
+# device.light_sensor, device.uvc_control, device.app_timer,
+# device.ai_energy_save_display, device.anti_direct_blow
+# device.all_error
+# device.model_type
+# device.current_temperature_outdoor
+# device.fault_display
+# device.elec_energy
+
+# Identity / firmware strings (via update_state or request_version)
+# device.hid, device.in_hid, device.oeep_hid, device.ota_hid, device.bc
 
 # Send the state update to the HVAC
 await device.push_state_update()

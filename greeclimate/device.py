@@ -44,6 +44,36 @@ class Props(enum.Enum):
     POWER_SAVE = "SvSt"
     UNKNOWN_HEATCOOLTYPE = "HeatCoolType"
 
+    # Newer properties observed in recent app ↔ device traffic.
+    # Older properties above are retained for compatibility with older units.
+    # Sleep-curve fields (Slp1L*/Slp1H*) observed live as L=160/H=0 defaults.
+    LIGHT_SENSOR = "LigSen"
+    UVC_CONTROL = "UvcControl"
+    ALL_ERROR = "AllErr"
+    APP_TIMER = "AppTimer"
+    AI_ENERGY_SAVE_DISPLAY = "AIEnSaveDis"
+    MODEL_TYPE = "ModelType"
+    TEMP_SENSOR_OUTDOOR = "TemsSenOut"
+    FAULT_DISPLAY = "FaultDisplay"
+    ANTI_DIRECT_BLOW = "AntiDirectBlow"
+    ELEC_ENERGY = "ElcEn"
+    SLEEP_CURVE_L1 = "Slp1L1"
+    SLEEP_CURVE_H1 = "Slp1H1"
+    SLEEP_CURVE_L2 = "Slp1L2"
+    SLEEP_CURVE_H2 = "Slp1H2"
+    SLEEP_CURVE_L3 = "Slp1L3"
+    SLEEP_CURVE_H3 = "Slp1H3"
+    SLEEP_CURVE_L4 = "Slp1L4"
+    SLEEP_CURVE_H4 = "Slp1H4"
+    SLEEP_CURVE_L5 = "Slp1L5"
+    SLEEP_CURVE_H5 = "Slp1H5"
+    SLEEP_CURVE_L6 = "Slp1L6"
+    SLEEP_CURVE_H6 = "Slp1H6"
+    SLEEP_CURVE_L7 = "Slp1L7"
+    SLEEP_CURVE_H7 = "Slp1H7"
+    SLEEP_CURVE_L8 = "Slp1L8"
+    SLEEP_CURVE_H8 = "Slp1H8"
+
 
 @unique
 class TemperatureUnits(IntEnum):
@@ -122,6 +152,18 @@ HUMIDITY_MIN = 30
 HUMIDITY_MAX = 80
 
 
+def sensor_raw_to_celsius_str(raw) -> str:
+    """Dual display for TemSen/TemsSenOut raws: `70 (30 C)`.
+
+    Single fork-owned raw-to-C formula feeding the CLI display path;
+    TemUn is read as a note only and never switches this display (D-06).
+    Assumes the non-v4 offset encoding (raw = °C + TEMP_OFFSET); v4
+    plain-°C raws pass through the getters unconverted and should not
+    use this helper.
+    """
+    return f"{raw} ({raw - TEMP_OFFSET} C)"
+
+
 class Device(DeviceProtocol2, Taskable):
     """Class representing a physical device, it's state and properties.
 
@@ -150,11 +192,30 @@ class Device(DeviceProtocol2, Taskable):
         turbo: A boolean to enable turbo operation (heat or cool faster initially)
         steady_heat: When enabled unit will maintain a target temperature of 8 degrees C
         power_save: A boolen to enable power save operation
+        light_sensor: A boolean to enable the ambient light sensor, if present
+        uvc_control: A boolean to enable UVC sterilization, if present
+        all_error: Device error bitmask/status reported by the unit
+        app_timer: App-managed timer value reported by the unit
+        ai_energy_save_display: A boolean for the AI energy-save display feature, if present
+        model_type: Device model type identifier reported by the unit
+        current_temperature_outdoor: Outdoor temperature reported by the unit, if present
+        fault_display: Fault display code/status reported by the unit
+        anti_direct_blow: A boolean to enable anti-direct-blow, if present
+        elec_energy: Electric energy related value reported by the unit
         target_humidity: An int to set the target relative humidity
         current_humidity: The current relative humidity
         clean_filter: A bool to indicate the filter needs cleaning
         water_full: A bool to indicate the water tank is full
+        hid: Indoor unit firmware identifier string
+        in_hid: Additional indoor firmware identifier, if present
+        oeep_hid: Outdoor/EEP firmware identifier, if present
+        ota_hid: OTA firmware identifier, if present
+        bc: Device barcode / code string, if present
     """
+
+    # Identity/firmware string cols requested by the app separately from normal HVAC props.
+    # Kept off Props so update_state stays focused on operational state.
+    IDENTITY_COLS = ("hid", "InHid", "OEEPHid", "OTAHid", "bc")
 
     def __init__(self, device_info: DeviceInfo, timeout: int = 120, bind_timeout: int = 10, loop: AbstractEventLoop = None):
         """Initialize the device object
@@ -170,11 +231,15 @@ class Device(DeviceProtocol2, Taskable):
         Taskable.__init__(self, loop)
         self._logger = logging.getLogger(__name__)
         self.device_info: DeviceInfo = device_info
-        
+
         self._bind_timeout = bind_timeout
-        
+
         """ Device properties """
         self.hid = None
+        self.in_hid = None
+        self.oeep_hid = None
+        self.ota_hid = None
+        self.bc = None
         self.version = None
         self.check_version = True
         self._properties = {}
@@ -259,12 +324,18 @@ class Device(DeviceProtocol2, Taskable):
         self._loop.create_task(self.update_state())
 
     async def request_version(self) -> None:
-        """Request the firmware version from the device."""
+        """Request firmware / identity fields from the device.
+
+        Requests the same identity cols the app queries (`hid`, `InHid`, `OEEPHid`,
+        `OTAHid`, `bc`). `hid` is still used to derive `version` when possible.
+        """
         if not self.device_cipher:
             await self.bind()
 
         try:
-            await self.send(self.create_status_message(self.device_info, "hid"))
+            await self.send(
+                self.create_status_message(self.device_info, *self.IDENTITY_COLS)
+            )
 
         except asyncio.TimeoutError:
             raise DeviceTimeoutError
@@ -288,14 +359,26 @@ class Device(DeviceProtocol2, Taskable):
             raise DeviceTimeoutError
 
     def handle_state_update(self, **kwargs) -> None:
-        """Handle incoming information about the firmware version of the device"""
+        """Handle incoming state and identity information from the device."""
 
         # Ex: hid = 362001000762+U-CS532AE(LT)V3.31.bin
         if "hid" in kwargs:
             self.hid = kwargs.pop("hid")
-            match = re.search(r"(?<=V)([\d.]+)\.bin$", self.hid)
-            self.version = match and match.group(1)
+            if isinstance(self.hid, str):
+                match = re.search(r"(?<=V)([\d.]+)\.bin$", self.hid)
+                self.version = match and match.group(1)
             self._logger.info(f"Device version is {self.version}, hid {self.hid}")
+
+        # Identity keep-last rule: cols absent from a reply (e.g. the empty
+        # OTAHid probe) leave the previous values in place; only present keys update.
+        if "InHid" in kwargs:
+            self.in_hid = kwargs.pop("InHid")
+        if "OEEPHid" in kwargs:
+            self.oeep_hid = kwargs.pop("OEEPHid")
+        if "OTAHid" in kwargs:
+            self.ota_hid = kwargs.pop("OTAHid")
+        if "bc" in kwargs:
+            self.bc = kwargs.pop("bc")
 
         self._properties.update(kwargs)
 
@@ -303,7 +386,9 @@ class Device(DeviceProtocol2, Taskable):
             self.check_version = False
             temp = self.get_property(Props.TEMP_SENSOR)
             self._logger.debug(f"Checking for temperature offset, reported temp {temp}")
-            if temp and temp < TEMP_OFFSET:
+            # Wrong-type sensor values must never crash version detection; the
+            # converted getters already yield None for them, so skip the check.
+            if isinstance(temp, (int, float)) and temp and temp < TEMP_OFFSET:
                 self.version = "4.0"
                 self._logger.info(f"Device version changed to {self.version}, hid {self.hid}")
             self._logger.debug(f"Using device temperature {self.current_temperature}")
@@ -447,17 +532,10 @@ class Device(DeviceProtocol2, Taskable):
     @property
     def current_temperature(self) -> Optional[int]:
         prop = self.get_property(Props.TEMP_SENSOR)
-        bit = self.get_property(Props.TEMP_BIT)
         if prop is not None:
-            bit = bit if bit is not None else 0
-            v = self.version and int(self.version.split(".")[0])
-            try:
-                if v == 4:
-                    return self._convert_to_units(prop, bit)
-                elif prop != 0:
-                    return self._convert_to_units(prop - TEMP_OFFSET, bit)
-            except ValueError:
-                logging.warning("Converting unexpected set temperature value %s", prop)
+            converted = self._convert_sensor_temperature(prop)
+            if converted is not None:
+                return converted
 
         return self.target_temperature
 
@@ -565,6 +643,157 @@ class Device(DeviceProtocol2, Taskable):
     @power_save.setter
     def power_save(self, value: bool):
         self.set_property(Props.POWER_SAVE, int(value))
+
+    @property
+    def light_sensor(self) -> Optional[bool]:
+        prop = self.get_property(Props.LIGHT_SENSOR)
+        return bool(prop) if prop is not None else None
+
+    @property
+    def uvc_control(self) -> Optional[bool]:
+        prop = self.get_property(Props.UVC_CONTROL)
+        return bool(prop) if prop is not None else None
+
+    @property
+    def all_error(self) -> Optional[int]:
+        return self.get_property(Props.ALL_ERROR)
+
+    @property
+    def app_timer(self) -> Optional[int]:
+        return self.get_property(Props.APP_TIMER)
+
+    @property
+    def ai_energy_save_display(self) -> Optional[bool]:
+        prop = self.get_property(Props.AI_ENERGY_SAVE_DISPLAY)
+        return bool(prop) if prop is not None else None
+
+    @property
+    def model_type(self) -> Optional[Any]:
+        return self.get_property(Props.MODEL_TYPE)
+
+    def _convert_sensor_temperature(self, prop) -> Optional[int]:
+        """Sensor rule: TemSen/TemsSenOut raws are Celsius + TEMP_OFFSET.
+
+        Wire encoding (upstream convention): the AC reports sensors as
+        °C + 40 so wire values stay non-negative; firmware v4 reports
+        plain °C (detected when a raw arrives below TEMP_OFFSET, see
+        handle_state_update). Ground truth 2026-10-16 (operator
+        thermometers vs MANUAL EXPERIMENT_01 snapshots): outdoor raw
+        69-70 against 28 °C weather, indoor raw 70-72 against 29 °C
+        room — raw-40 matches within integer rounding, while the 02-04
+        raw-is-Fahrenheit reading was ~8 °C off on both sensors and is
+        retired. Unit-aware: the result runs through _convert_to_units,
+        so F-mode devices read °F (TemUn still never picks the formula,
+        only the display units — D-06). Raw 0 is the no-sensor sentinel
+        yielding None (falls back to the setpoint); wrong-type raws
+        yield None instead of raising (02-02 guard).
+        """
+        if prop is None:
+            return None
+
+        try:
+            raw = int(prop)
+        except (TypeError, ValueError):
+            logging.warning("Converting unexpected temperature sensor value %s", prop)
+            return None
+
+        if raw == 0:
+            return None
+
+        bit = self.get_property(Props.TEMP_BIT)
+        bit = bit if bit is not None else 0
+        v = self.version and int(self.version.split(".")[0])
+        try:
+            if v == 4:
+                return self._convert_to_units(raw, bit)
+            return self._convert_to_units(raw - TEMP_OFFSET, bit)
+        except ValueError:
+            logging.warning("Converting unexpected temperature sensor value %s", prop)
+            return None
+
+    @property
+    def current_temperature_outdoor(self) -> Optional[int]:
+        """Outdoor temperature from TemsSenOut, using the same offset rules as indoor."""
+        return self._convert_sensor_temperature(
+            self.get_property(Props.TEMP_SENSOR_OUTDOOR)
+        )
+
+    @property
+    def fault_display(self) -> Optional[Any]:
+        return self.get_property(Props.FAULT_DISPLAY)
+
+    @property
+    def anti_direct_blow(self) -> Optional[bool]:
+        prop = self.get_property(Props.ANTI_DIRECT_BLOW)
+        return bool(prop) if prop is not None else None
+
+    @property
+    def elec_energy(self) -> Optional[Any]:
+        return self.get_property(Props.ELEC_ENERGY)
+
+    @property
+    def sleep_curve_l1(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_L1)
+
+    @property
+    def sleep_curve_h1(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_H1)
+
+    @property
+    def sleep_curve_l2(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_L2)
+
+    @property
+    def sleep_curve_h2(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_H2)
+
+    @property
+    def sleep_curve_l3(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_L3)
+
+    @property
+    def sleep_curve_h3(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_H3)
+
+    @property
+    def sleep_curve_l4(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_L4)
+
+    @property
+    def sleep_curve_h4(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_H4)
+
+    @property
+    def sleep_curve_l5(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_L5)
+
+    @property
+    def sleep_curve_h5(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_H5)
+
+    @property
+    def sleep_curve_l6(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_L6)
+
+    @property
+    def sleep_curve_h6(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_H6)
+
+    @property
+    def sleep_curve_l7(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_L7)
+
+    @property
+    def sleep_curve_h7(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_H7)
+
+    @property
+    def sleep_curve_l8(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_L8)
+
+    @property
+    def sleep_curve_h8(self) -> Optional[int]:
+        return self.get_property(Props.SLEEP_CURVE_H8)
 
     @property
     def target_humidity(self) -> Optional[int]:

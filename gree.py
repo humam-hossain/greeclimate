@@ -25,7 +25,49 @@ class DiscoveryListener(Listener):
             device = Device(device_info)
             await device.bind()
             await device.request_version()
-            _LOGGER.info(f"Device firmware: {device.hid}")
+            await device.update_state()
+            _LOGGER.info(
+                "Device firmware hid=%s in_hid=%s oeep_hid=%s ota_hid=%s bc=%s",
+                device.hid,
+                device.in_hid,
+                device.oeep_hid,
+                device.ota_hid,
+                device.bc,
+            )
+            _LOGGER.info(
+                "Device model_type=%s all_error=%s fault=%s outdoor_temp=%s "
+                "light_sensor=%s uvc=%s app_timer=%s ai_save=%s anti_blow=%s elec=%s",
+                device.model_type,
+                device.all_error,
+                device.fault_display,
+                device.current_temperature_outdoor,
+                device.light_sensor,
+                device.uvc_control,
+                device.app_timer,
+                device.ai_energy_save_display,
+                device.anti_direct_blow,
+                device.elec_energy,
+            )
+            _LOGGER.info(
+                "Device sleep_curve l1=%s h1=%s l2=%s h2=%s l3=%s h3=%s l4=%s h4=%s "
+                "l5=%s h5=%s l6=%s h6=%s l7=%s h7=%s l8=%s h8=%s",
+                device.sleep_curve_l1,
+                device.sleep_curve_h1,
+                device.sleep_curve_l2,
+                device.sleep_curve_h2,
+                device.sleep_curve_l3,
+                device.sleep_curve_h3,
+                device.sleep_curve_l4,
+                device.sleep_curve_h4,
+                device.sleep_curve_l5,
+                device.sleep_curve_h5,
+                device.sleep_curve_l6,
+                device.sleep_curve_h6,
+                device.sleep_curve_l7,
+                device.sleep_curve_h7,
+                device.sleep_curve_l8,
+                device.sleep_curve_h8,
+            )
 
 
 async def run_discovery(bind=False):
